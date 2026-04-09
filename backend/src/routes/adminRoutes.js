@@ -14,6 +14,11 @@ import {
   bulkDeleteStudents,
   updateStudent,
   bulkUpdateStudents,
+  listPassages,
+  createPassage,
+  updatePassage,
+  deletePassage,
+  exportPassagesExcel,
 } from '../controllers/adminController.js';
 
 export const adminRoutes = Router();
@@ -24,6 +29,7 @@ adminRoutes.get('/dashboard', dashboard);
 adminRoutes.get('/results', listResults);
 adminRoutes.get('/export/questions', exportQuestionsExcel);
 adminRoutes.get('/export/students', exportStudentsExcel);
+adminRoutes.get('/export/passages', exportPassagesExcel);
 adminRoutes.post('/upload/students', uploadSingleExcel, uploadStudents);
 adminRoutes.post('/upload/questions', uploadSingleExcel, uploadQuestions);
 adminRoutes.post('/students/bulk-delete', bulkDeleteStudents);
@@ -32,4 +38,11 @@ adminRoutes.post('/students/reset-all-exams', resetAllExams);
 adminRoutes.post('/students/:studentId/reset', resetStudent);
 adminRoutes.patch('/students/:studentId', updateStudent);
 adminRoutes.delete('/students/:studentId', deleteStudent);
+
+// Reading Passages
+adminRoutes.get('/passages', listPassages);
+adminRoutes.post('/passages', createPassage);
+adminRoutes.patch('/passages/:passageId', updatePassage);
+adminRoutes.delete('/passages/:passageId', deletePassage);
+
 

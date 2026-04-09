@@ -5,13 +5,22 @@ import { getOrCreateSession, startExamIfNeeded, autoSubmitIfExpired, finalizeSub
 import { httpError } from '../utils/httpError.js';
 import { shuffleQuestionsForStudent } from '../utils/shuffle.js';
 
-function toQuestionDTO(q) {
-  return {
+function toQuestionDTO(q, isSubmitted = false) {
+  const base = {
     id: q._id,
     subject: q.subject,
     questionText: q.questionText,
     options: q.options,
+    passageRef: q.passageRef
+      ? { id: q.passageRef._id, title: q.passageRef.title, body: q.passageRef.body }
+      : null,
   };
+  if (isSubmitted) {
+    base.correctAnswer = q.correctAnswer;
+    base.answerExplanation = q.answerExplanation;
+    base.wrongStatementsExplanation = q.wrongStatementsExplanation;
+  }
+  return base;
 }
 
 function sessionState(session) {
@@ -48,7 +57,8 @@ export async function getExamData(req, res) {
 
   const subjects = student.subjects || [];
   const questions = await Question.find({ isActive: true, subject: { $in: subjects } })
-    .sort({ subject: 1, createdAt: 1 });
+    .sort({ subject: 1, createdAt: 1 })
+    .populate('passageRef', 'title body');
 
   const resetCount = student.examResetCount || 0;
   const studentId = String(student._id);
@@ -57,7 +67,7 @@ export async function getExamData(req, res) {
     const shuffled = shuffleQuestionsForStudent(studentId, resetCount, subject, list);
     return {
       subject,
-      questions: shuffled.map(toQuestionDTO),
+      questions: shuffled.map((q) => toQuestionDTO(q, session.isSubmitted)),
     };
   });
 

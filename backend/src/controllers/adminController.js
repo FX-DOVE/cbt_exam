@@ -4,6 +4,7 @@ import multer from 'multer';
 import { User } from '../models/User.js';
 import { Question } from '../models/Question.js';
 import { ExamSession } from '../models/ExamSession.js';
+import { ReadingPassage } from '../models/ReadingPassage.js';
 import {
   parseSubjects,
   parseQuestionWorkbook,
@@ -75,14 +76,36 @@ export async function uploadStudents(req, res) {
 
 export async function uploadQuestions(req, res) {
   if (!req.file?.buffer) throw httpError(400, 'No file uploaded');
-  const { docs, legacySheets, subjectSheets } = parseQuestionWorkbook(req.file.buffer);
+  const { docs, passageDocs, passageTitleMap, legacySheets, subjectSheets } = parseQuestionWorkbook(req.file.buffer);
 
-  await Question.insertMany(docs);
+  // Upsert passages (match by title + subject)
+  const passageIdMap = new Map(); // normalized title → ObjectId
+  for (const p of passageDocs) {
+    const existing = await ReadingPassage.findOneAndUpdate(
+      { title: p.title, subject: p.subject },
+      { $set: { body: p.body, isActive: true } },
+      { upsert: true, new: true }
+    );
+    passageIdMap.set(p.title.toLowerCase(), existing._id);
+  }
+
+  // Resolve _passageTitleKey → actual ObjectId before insert
+  const resolvedDocs = docs.map((d) => {
+    const doc = { ...d };
+    if (doc._passageTitleKey && passageIdMap.has(doc._passageTitleKey)) {
+      doc.passageRef = passageIdMap.get(doc._passageTitleKey);
+    }
+    delete doc._passageTitleKey;
+    return doc;
+  });
+
+  await Question.insertMany(resolvedDocs);
 
   res.json({
     message: 'Questions uploaded',
-    created: docs.length,
-    totalRows: docs.length,
+    created: resolvedDocs.length,
+    passagesUpserted: passageDocs.length,
+    totalRows: resolvedDocs.length,
     sheetsSubjectBased: subjectSheets,
     sheetsLegacyWithSubjectColumn: legacySheets,
   });
@@ -145,7 +168,7 @@ export async function listResults(req, res) {
 }
 
 export async function exportQuestionsExcel(req, res) {
-  const questions = await Question.find({ isActive: true }).sort({ subject: 1, createdAt: 1 }).lean();
+  const questions = await Question.find({ isActive: true }).sort({ subject: 1, createdAt: 1 }).populate('passageRef', 'title').lean();
   const bySubject = new Map();
   for (const q of questions) {
     const key = q.subject || 'General';
@@ -173,6 +196,9 @@ export async function exportQuestionsExcel(req, res) {
       optionC: q.options?.C ?? '',
       optionD: q.options?.D ?? '',
       correctAnswer: q.correctAnswer,
+      answerExplanation: q.answerExplanation ?? '',
+      wrongStatementsExplanation: q.wrongStatementsExplanation ?? '',
+      passageTitle: q.passageRef?.title ?? '',
     }));
     const ws = xlsx.utils.json_to_sheet(rows);
     xlsx.utils.book_append_sheet(wb, ws, title);
@@ -369,4 +395,79 @@ export async function bulkUpdateStudents(req, res) {
   const result = await User.updateMany({ _id: { $in: ids }, role: 'student' }, updateOps);
   res.json({ message: 'Students updated', matchedCount: result.matchedCount, modifiedCount: result.modifiedCount });
 }
+
+/* ───────── Reading Passages CRUD ───────── */
+
+export async function listPassages(req, res) {
+  const passages = await ReadingPassage.find({ isActive: true }).sort({ subject: 1, title: 1 }).lean();
+  // Count how many questions are linked to each passage
+  const counts = await Question.aggregate([
+    { $match: { passageRef: { $in: passages.map((p) => p._id) } } },
+    { $group: { _id: '$passageRef', count: { $sum: 1 } } },
+  ]);
+  const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
+  res.json({
+    passages: passages.map((p) => ({
+      _id: p._id,
+      title: p.title,
+      subject: p.subject,
+      body: p.body,
+      questionCount: countMap.get(String(p._id)) || 0,
+      createdAt: p.createdAt,
+    })),
+  });
+}
+
+export async function createPassage(req, res) {
+  const { title, subject, body } = req.body;
+  if (!title?.trim()) throw httpError(400, 'title is required');
+  if (!subject?.trim()) throw httpError(400, 'subject is required');
+  if (!body?.trim()) throw httpError(400, 'body is required');
+  const passage = await ReadingPassage.create({ title: title.trim(), subject: subject.trim(), body: body.trim() });
+  res.status(201).json({ message: 'Passage created', passage });
+}
+
+export async function updatePassage(req, res) {
+  const { passageId } = req.params;
+  if (!mongoose.isValidObjectId(passageId)) throw httpError(400, 'Invalid passage id');
+  const { title, subject, body } = req.body;
+  const update = {};
+  if (title !== undefined) update.title = String(title).trim();
+  if (subject !== undefined) update.subject = String(subject).trim();
+  if (body !== undefined) update.body = String(body).trim();
+  if (Object.keys(update).length === 0) throw httpError(400, 'No fields to update');
+  const passage = await ReadingPassage.findByIdAndUpdate(passageId, { $set: update }, { new: true, runValidators: true });
+  if (!passage) throw httpError(404, 'Passage not found');
+  res.json({ message: 'Passage updated', passage });
+}
+
+export async function deletePassage(req, res) {
+  const { passageId } = req.params;
+  if (!mongoose.isValidObjectId(passageId)) throw httpError(400, 'Invalid passage id');
+  const passage = await ReadingPassage.findByIdAndDelete(passageId);
+  if (!passage) throw httpError(404, 'Passage not found');
+  // Unlink from any questions
+  await Question.updateMany({ passageRef: passage._id }, { $set: { passageRef: null } });
+  res.json({ message: 'Passage deleted' });
+}
+
+export async function exportPassagesExcel(req, res) {
+  const passages = await ReadingPassage.find({ isActive: true }).sort({ subject: 1, title: 1 }).lean();
+  const rows = passages.map((p) => ({ title: p.title, subject: p.subject, body: p.body }));
+  const wb = xlsx.utils.book_new();
+  const ws = xlsx.utils.json_to_sheet(rows);
+  xlsx.utils.book_append_sheet(wb, ws, 'Passages');
+  const info = [
+    ['Passages export'],
+    ['Columns: title, subject, body'],
+    ['To link a question to a passage, add a passageTitle column to the questions sheet with the exact title.'],
+  ];
+  xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(info), 'Instructions');
+  const buffer = workbookToBuffer(wb);
+  const filename = `passages_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buffer);
+}
+
 

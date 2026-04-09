@@ -41,13 +41,26 @@ export function AdminDashboardPage() {
   const [editSaving, setEditSaving] = useState(false);
   const selectAllRef = useRef(null);
 
+  // Reading Passages state
+  const [passages, setPassages] = useState([]);
+  const [passageForm, setPassageForm] = useState({ title: '', subject: 'English', body: '' });
+  const [passageFormOpen, setPassageFormOpen] = useState(false);
+  const [editingPassageId, setEditingPassageId] = useState(null);
+  const [passageSaving, setPassageSaving] = useState(false);
+
   async function load() {
     const { data } = await api.get('/admin/dashboard');
     setDashboard(data);
   }
 
+  async function loadPassages() {
+    const { data } = await api.get('/admin/passages');
+    setPassages(data.passages || []);
+  }
+
   useEffect(() => {
     load();
+    loadPassages();
   }, []);
 
   const studentIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -247,6 +260,60 @@ export function AdminDashboardPage() {
     }
   }
 
+  async function onDownloadPassages() {
+    setStatus('Downloading passages…');
+    try {
+      await downloadExcel('/admin/export/passages', 'passages.xlsx');
+      setStatus('Passages spreadsheet downloaded.');
+    } catch (e) {
+      setStatus(e.response?.data?.message || e.message || 'Download failed');
+    }
+  }
+
+  function openCreatePassage() {
+    setEditingPassageId(null);
+    setPassageForm({ title: '', subject: 'English', body: '' });
+    setPassageFormOpen(true);
+  }
+
+  function openEditPassage(p) {
+    setEditingPassageId(p._id);
+    setPassageForm({ title: p.title, subject: p.subject, body: p.body });
+    setPassageFormOpen(true);
+  }
+
+  async function savePassage(e) {
+    e.preventDefault();
+    setPassageSaving(true);
+    setStatus('');
+    try {
+      if (editingPassageId) {
+        await api.patch(`/admin/passages/${editingPassageId}`, passageForm);
+        setStatus('Passage updated.');
+      } else {
+        await api.post('/admin/passages', passageForm);
+        setStatus('Passage created.');
+      }
+      setPassageFormOpen(false);
+      await loadPassages();
+    } catch (err) {
+      setStatus(err.response?.data?.message || err.message || 'Save failed');
+    } finally {
+      setPassageSaving(false);
+    }
+  }
+
+  async function deletePassage(id) {
+    if (!window.confirm('Delete this passage? Questions linked to it will be unlinked.')) return;
+    try {
+      await api.delete(`/admin/passages/${id}`);
+      setStatus('Passage deleted.');
+      await loadPassages();
+    } catch (err) {
+      setStatus(err.response?.data?.message || err.message || 'Delete failed');
+    }
+  }
+
   async function onDownloadStudents() {
     setStatus('Downloading students…');
     try {
@@ -288,9 +355,9 @@ export function AdminDashboardPage() {
       <div className="card">
         <h2>Excel — upload &amp; download</h2>
         <p className="muted">
-          Questions: one worksheet per subject (tab name = subject). Columns per sheet: questionText,
-          optionA–D, correctAnswer. Students: include optional gender (male/female). Passwords are not
-          exported (see Instructions sheet).
+          Questions: one worksheet per subject. Columns: questionText, optionA–D, correctAnswer. 
+          Optional: <strong>passageTitle</strong>, <strong>answerExplanation</strong>. 
+          To upload reading passages simultaneously, create a sheet ending in " passages" (e.g. <strong>"English passages"</strong>) with a block layout: label blocks with <strong>"title"</strong> and <strong>"passage"</strong> in column B, then add a questions table (number, optionA–D, correctAnswer) underneath.
         </p>
         <div className="upload-row">
           <label className="upload-btn">
@@ -307,8 +374,49 @@ export function AdminDashboardPage() {
           <button type="button" className="btn-secondary" onClick={onDownloadQuestions}>
             Download Questions (.xlsx)
           </button>
+          <button type="button" className="btn-secondary" onClick={onDownloadPassages}>
+            Download Passages (.xlsx)
+          </button>
         </div>
         {status ? <p>{status}</p> : null}
+      </div>
+
+      <div className="card">
+        <div className="students-toolbar">
+          <h2>Reading Passages</h2>
+          <div className="toolbar-actions">
+            <button type="button" className="btn-secondary" onClick={openCreatePassage}>+ Add Passage</button>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Subject</th>
+                <th>Body Preview</th>
+                <th>Questions</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {passages.length === 0 ? (
+                <tr><td colSpan={5} style={{ textAlign: 'center', color: '#94a3b8' }}>No passages yet. Add one or upload via Excel.</td></tr>
+              ) : passages.map((p) => (
+                <tr key={p._id}>
+                  <td><strong>{p.title}</strong></td>
+                  <td>{p.subject}</td>
+                  <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#64748b' }}>{p.body.slice(0, 80)}…</td>
+                  <td>{p.questionCount}</td>
+                  <td className="td-actions">
+                    <button type="button" className="btn-small" onClick={() => openEditPassage(p)}>Edit</button>
+                    <button type="button" className="btn-small danger" onClick={() => deletePassage(p._id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
@@ -410,6 +518,50 @@ export function AdminDashboardPage() {
           </table>
         </div>
       </div>
+
+      {passageFormOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => !passageSaving && setPassageFormOpen(false)}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: '640px' }} onClick={(e) => e.stopPropagation()}>
+            <h3>{editingPassageId ? 'Edit Passage' : 'Add Reading Passage'}</h3>
+            <p className="muted">Passages are shown to students above the questions linked to them.</p>
+            <form className="edit-form" onSubmit={savePassage}>
+              <div className="edit-field">
+                <label>Title</label>
+                <input
+                  value={passageForm.title}
+                  onChange={(e) => setPassageForm((f) => ({ ...f, title: e.target.value }))}
+                  required
+                  placeholder="e.g. Passage 1: The River"
+                />
+              </div>
+              <div className="edit-field">
+                <label>Subject</label>
+                <input
+                  value={passageForm.subject}
+                  onChange={(e) => setPassageForm((f) => ({ ...f, subject: e.target.value }))}
+                  required
+                  placeholder="English"
+                />
+              </div>
+              <div className="edit-field">
+                <label>Passage Body</label>
+                <textarea
+                  value={passageForm.body}
+                  onChange={(e) => setPassageForm((f) => ({ ...f, body: e.target.value }))}
+                  required
+                  rows={10}
+                  placeholder="Paste or type the full reading passage here…"
+                  style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: '14px', padding: '10px', borderRadius: '8px', border: '1px solid #e2e8f0', lineHeight: '1.7' }}
+                />
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" disabled={passageSaving} onClick={() => setPassageFormOpen(false)}>Cancel</button>
+                <button type="submit" disabled={passageSaving}>{passageSaving ? 'Saving…' : 'Save Passage'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {editOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => !editSaving && setEditOpen(false)}>

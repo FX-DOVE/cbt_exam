@@ -15,6 +15,9 @@ const questionSchema = new mongoose.Schema(
       enum: ['A', 'B', 'C', 'D'],
       required: true,
     },
+    answerExplanation: { type: String, trim: true },
+    wrongStatementsExplanation: { type: String, trim: true },
+    passageRef: { type: mongoose.Schema.Types.ObjectId, ref: 'ReadingPassage', default: null },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
