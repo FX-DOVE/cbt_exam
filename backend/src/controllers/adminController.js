@@ -167,48 +167,102 @@ export async function listResults(req, res) {
   });
 }
 
-export async function exportQuestionsExcel(req, res) {
-  const questions = await Question.find({ isActive: true }).sort({ subject: 1, createdAt: 1 }).populate('passageRef', 'title').lean();
-  const bySubject = new Map();
-  for (const q of questions) {
-    const key = q.subject || 'General';
-    if (!bySubject.has(key)) bySubject.set(key, []);
-    bySubject.get(key).push(q);
+function generateBlockLayoutRows(passageGroup) {
+  const rows = [];
+  // For each passage in this subject
+  for (const group of passageGroup) {
+    const { passage, questions } = group;
+    rows.push(['title', passage.title]);
+    rows.push(['passage', passage.body]);
+    rows.push([]); // spacer row
+    // Headers row
+    rows.push([
+      'question number',
+      'questions',
+      'optionA',
+      'optionB',
+      'optionC',
+      'optionD',
+      'correctAnswer',
+      'answerExplanation',
+    ]);
+    // questions
+    questions.forEach((q, idx) => {
+      rows.push([
+        idx + 1,
+        q.questionText,
+        q.options?.A ?? '',
+        q.options?.B ?? '',
+        q.options?.C ?? '',
+        q.options?.D ?? '',
+        q.correctAnswer,
+        q.answerExplanation ?? '',
+      ]);
+    });
+    rows.push([]); // Block spacer
+    rows.push([]);
   }
+  return rows;
+}
+
+export async function exportQuestionsExcel(req, res) {
+  const questions = await Question.find({ isActive: true })
+    .sort({ subject: 1, createdAt: 1 })
+    .populate('passageRef', 'title body')
+    .lean();
 
   const wb = xlsx.utils.book_new();
-  const usedTitles = new Set();
+  const subjects = [...new Set(questions.map((q) => q.subject || 'General'))];
 
-  for (const [subject, list] of bySubject) {
-    let title = sanitizeSheetTitle(subject);
-    let base = title;
-    let n = 2;
-    while (usedTitles.has(title.toLowerCase())) {
-      title = sanitizeSheetTitle(`${base.slice(0, 22)}_${n}`);
-      n += 1;
+  for (const subject of subjects) {
+    const subjectQuestions = questions.filter((q) => q.subject === subject);
+    
+    // 1. Handle Questions WITH passages (Block Layout)
+    const passageMap = new Map(); // passageId -> { passage, questions: [] }
+    const standaloneQuestions = [];
+
+    for (const q of subjectQuestions) {
+      if (q.passageRef) {
+        const pid = String(q.passageRef._id);
+        if (!passageMap.has(pid)) {
+          passageMap.set(pid, { passage: q.passageRef, questions: [] });
+        }
+        passageMap.get(pid).questions.push(q);
+      } else {
+        standaloneQuestions.push(q);
+      }
     }
-    usedTitles.add(title.toLowerCase());
 
-    const rows = list.map((q) => ({
-      questionText: q.questionText,
-      optionA: q.options?.A ?? '',
-      optionB: q.options?.B ?? '',
-      optionC: q.options?.C ?? '',
-      optionD: q.options?.D ?? '',
-      correctAnswer: q.correctAnswer,
-      answerExplanation: q.answerExplanation ?? '',
-      wrongStatementsExplanation: q.wrongStatementsExplanation ?? '',
-      passageTitle: q.passageRef?.title ?? '',
-    }));
-    const ws = xlsx.utils.json_to_sheet(rows);
-    xlsx.utils.book_append_sheet(wb, ws, title);
+    if (passageMap.size > 0) {
+      const passageGroupName = sanitizeSheetTitle(`${subject} passages`);
+      const blockRows = generateBlockLayoutRows(Array.from(passageMap.values()));
+      const wsPassages = xlsx.utils.aoa_to_sheet(blockRows);
+      xlsx.utils.book_append_sheet(wb, wsPassages, passageGroupName);
+    }
+
+    // 2. Handle Questions WITHOUT passages (Standard Layout)
+    if (standaloneQuestions.length > 0) {
+      const sheetName = sanitizeSheetTitle(subject);
+      const rows = standaloneQuestions.map((q) => ({
+        questionText: q.questionText,
+        optionA: q.options?.A ?? '',
+        optionB: q.options?.B ?? '',
+        optionC: q.options?.C ?? '',
+        optionD: q.options?.D ?? '',
+        correctAnswer: q.correctAnswer,
+        answerExplanation: q.answerExplanation ?? '',
+        wrongStatementsExplanation: q.wrongStatementsExplanation ?? '',
+      }));
+      const ws = xlsx.utils.json_to_sheet(rows);
+      xlsx.utils.book_append_sheet(wb, ws, sheetName);
+    }
   }
 
   const info = [
     ['Questions export'],
     ['One worksheet per subject. The tab name is the subject name used in the app.'],
+    ['Subject passages tabs contain reading passages and their linked questions in block format.'],
     ['Columns per sheet: questionText, optionA, optionB, optionC, optionD, correctAnswer.'],
-    ['Student subject lists must match these tab names (spelling).'],
   ];
   xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(info), sanitizeSheetTitle('Instructions'));
 
