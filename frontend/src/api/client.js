@@ -6,6 +6,17 @@ export const api = axios.create({
   baseURL: `${API_BASE_URL}/api`,
 });
 
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('cbt_auth_v1');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
 export function setAuthToken(token) {
   if (token) api.defaults.headers.common.Authorization = `Bearer ${token}`;
   else delete api.defaults.headers.common.Authorization;

@@ -87,7 +87,7 @@ export async function startExam(req, res) {
 
 const saveAnswerSchema = z.object({
   questionId: z.string().min(1),
-  selectedOption: z.enum(['A', 'B', 'C', 'D']),
+  selectedOption: z.enum(['A', 'B', 'C', 'D']).nullable().optional(),
 });
 
 export async function saveAnswer(req, res) {
@@ -106,13 +106,22 @@ export async function saveAnswer(req, res) {
   if (!student.subjects.includes(question.subject)) throw httpError(403, 'Question not assigned to student');
 
   const idx = session.answers.findIndex((a) => String(a.question) === parsed.data.questionId);
-  const answerDoc = {
-    question: question._id,
-    selectedOption: parsed.data.selectedOption,
-    subject: question.subject,
-  };
-  if (idx === -1) session.answers.push(answerDoc);
-  else session.answers[idx] = answerDoc;
+  
+  if (!parsed.data.selectedOption) {
+    // Reset answer
+    if (idx !== -1) {
+      session.answers.splice(idx, 1);
+    }
+  } else {
+    // Save answer
+    const answerDoc = {
+      question: question._id,
+      selectedOption: parsed.data.selectedOption,
+      subject: question.subject,
+    };
+    if (idx === -1) session.answers.push(answerDoc);
+    else session.answers[idx] = answerDoc;
+  }
 
   await session.save();
   res.json({ message: 'Answer saved', examSession: sessionState(session) });
