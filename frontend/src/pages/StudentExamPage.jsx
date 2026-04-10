@@ -104,6 +104,33 @@ export function StudentExamPage() {
     return () => clearInterval(id);
   }, [data?.examSession?.hasStarted, data?.examSession?.isSubmitted, data?.examSession?.timeLeftMs]);
 
+  // Periodic poll to check if admin forced submission
+  useEffect(() => {
+    if (!data?.examSession?.hasStarted || data?.examSession?.isSubmitted) return;
+    const pollId = setInterval(() => {
+      api.get('/student/exam')
+        .then(res => {
+          if (res.data.examSession.isSubmitted) {
+             setData(res.data);
+          }
+        })
+        .catch(console.error);
+    }, 15000); // 15 seconds poll
+    return () => clearInterval(pollId);
+  }, [data?.examSession?.hasStarted, data?.examSession?.isSubmitted]);
+
+  // Periodic poll to check if admin opened the exam
+  useEffect(() => {
+    if (!data) return;
+    if (data.isExamOpen || data?.examSession?.hasStarted) return;
+    
+    const openPollId = setInterval(() => {
+      loadExam();
+    }, 5000); // Check every 5 seconds if admin started the exam
+    
+    return () => clearInterval(openPollId);
+  }, [data?.isExamOpen, data?.examSession?.hasStarted]);
+
   useEffect(() => {
     if (selectedSubject) {
       setVisitedSet(prev => {
@@ -270,6 +297,9 @@ export function StudentExamPage() {
       await loadExam();
     } catch (err) {
       console.error(err);
+      if (err.response?.status === 403) {
+        await loadExam(); // Reload to capture the submission state if admin ended it
+      }
     } finally {
       setSaving(false);
     }
@@ -500,6 +530,18 @@ export function StudentExamPage() {
   }
 
   if (!session.hasStarted) {
+    if (!data.isExamOpen) {
+      return (
+        <div className="instructions-page">
+          <div className="instructions-card" style={{ textAlign: 'center', padding: '40px' }}>
+            <h2 className="instructions-title" style={{ color: '#ef4444' }}>Test Access is Closed</h2>
+            <p style={{ marginTop: '16px', color: '#64748b' }}>Please wait for the administrator to open the exam session.</p>
+            <button className="btn-primary" style={{ marginTop: '24px' }} onClick={loadExam}>Refresh Status</button>
+          </div>
+        </div>
+      );
+    }
+
     const totalQuestions = (data?.subjects || []).reduce((acc, s) => acc + s.questions.length, 0);
     const durationMins = Math.round(session.timeLeftMs / 60000) || 30;
     const subjectsList = data.subjects.map((s) => s.subject).join(', ');

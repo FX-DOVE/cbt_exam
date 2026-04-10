@@ -48,6 +48,28 @@ export function AdminDashboardPage() {
   const [editingPassageId, setEditingPassageId] = useState(null);
   const [passageSaving, setPassageSaving] = useState(false);
 
+  // Config & Control state
+  const [examDuration, setExamDuration] = useState(120);
+  const [allResults, setAllResults] = useState([]);
+
+  async function loadConfig() {
+    try {
+      const { data } = await api.get('/admin/config');
+      setExamDuration(data.examDurationMinutes || 120);
+    } catch(err) {
+      console.error(err);
+    }
+  }
+
+  async function loadAllResults() {
+    try {
+      const { data } = await api.get('/admin/results');
+      setAllResults(data.results || []);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   async function load() {
     const { data } = await api.get('/admin/dashboard');
     setDashboard(data);
@@ -61,7 +83,21 @@ export function AdminDashboardPage() {
   useEffect(() => {
     load();
     loadPassages();
+    loadConfig();
+    loadAllResults();
   }, []);
+
+  const analytics = useMemo(() => {
+    if (!allResults.length) return { avg: 0, high: 0, low: 0, count: 0 };
+    const scores = allResults.map(r => r.scorePercent || 0);
+    const sum = scores.reduce((a,b) => a+b, 0);
+    return {
+       avg: (sum / scores.length).toFixed(1),
+       high: Math.max(...scores),
+       low: Math.min(...scores),
+       count: scores.length
+    };
+  }, [allResults]);
 
   const studentIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allSelected =
@@ -324,6 +360,61 @@ export function AdminDashboardPage() {
     }
   }
 
+  async function downloadResults() {
+    setStatus('Generating export...');
+    try {
+      await downloadExcel('/admin/export/results', 'exam_results.xlsx');
+      setStatus('Full exam results downloaded.');
+    } catch (e) {
+      setStatus(e.response?.data?.message || e.message || 'Download failed');
+    }
+  }
+
+  async function saveConfig() {
+    setStatus('');
+    try {
+      await api.patch('/admin/config', { examDurationMinutes: Number(examDuration) });
+      setStatus('Config saved.');
+    } catch(err) {
+      setStatus('Failed to save config: ' + err.message);
+    }
+  }
+
+  async function startAllExams() {
+    if (!window.confirm('Start all exam sessions right now? Each student will be given the configured duration starting NOW.')) return;
+    setStatus('');
+    try {
+      const { data } = await api.post('/admin/exams/start-all');
+      setStatus(data.message);
+      await load();
+    } catch(err) {
+      setStatus('Failed: ' + err.message);
+    }
+  }
+
+  async function endAllExams() {
+    if (!window.confirm('Force end and autosubmit ALL active exam sessions right now?')) return;
+    setStatus('');
+    try {
+      const { data } = await api.post('/admin/exams/end-all');
+      setStatus(data.message);
+      await load();
+    } catch(err) {
+      setStatus('Failed: ' + err.message);
+    }
+  }
+
+  async function endSingleExam(studentId) {
+    if (!window.confirm('Force end tracking for this student?')) return;
+    try {
+      await api.post(`/admin/students/${studentId}/end-exam`);
+      setStatus('Exam ended successfully.');
+      await load();
+    } catch(err) {
+      setStatus('Failed end exam: ' + err.message);
+    }
+  }
+
   if (!dashboard) return <div className="center">Loading dashboard...</div>;
 
   return (
@@ -350,6 +441,28 @@ export function AdminDashboardPage() {
           <h3>Sessions</h3>
           <p>{dashboard.stats.sessionCount}</p>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>Exam Settings & Controls</h2>
+        <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: '16px' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>Duration (minutes)</label>
+            <input 
+              type="number" 
+              min="1" 
+              value={examDuration} 
+              onChange={e => setExamDuration(e.target.value)} 
+              style={{ width: '120px', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px' }} 
+            />
+          </div>
+          <button type="button" onClick={saveConfig}>Save Duration</button>
+        </div>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          <button type="button" onClick={startAllExams} style={{ background: '#10b981', color: 'white' }}>🚀 Start All Exams</button>
+          <button type="button" className="danger" onClick={endAllExams}>🛑 End All Exams</button>
+        </div>
+        {status ? <p style={{ marginTop: '10px' }}>{status}</p> : null}
       </div>
 
       <div className="card">
@@ -479,6 +592,9 @@ export function AdminDashboardPage() {
                     <button type="button" className="btn-small danger" onClick={() => deleteOne(s._id)}>
                       Delete
                     </button>
+                    <button type="button" className="btn-small danger" onClick={() => endSingleExam(s._id)}>
+                      End Exam
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -488,32 +604,66 @@ export function AdminDashboardPage() {
       </div>
 
       <div className="card">
-        <h2>Recent Results</h2>
-        <div className="table-wrap">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h2>Exam Analytics &amp; Full Results</h2>
+          <button type="button" className="btn-primary" onClick={downloadResults}>
+            Download Full Results (.xlsx)
+          </button>
+        </div>
+        
+        <div className="grid" style={{ marginBottom: '24px' }}>
+          <div className="card" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', boxShadow: 'none' }}>
+            <h3 style={{ fontSize: '14px', color: '#64748b' }}>Completed Exams</h3>
+            <p style={{ fontSize: '24px', fontWeight: 'bold' }}>{analytics.count}</p>
+          </div>
+          <div className="card" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', boxShadow: 'none' }}>
+            <h3 style={{ fontSize: '14px', color: '#64748b' }}>Average Score</h3>
+            <p style={{ fontSize: '24px', fontWeight: 'bold' }}>{analytics.avg}%</p>
+          </div>
+          <div className="card" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', boxShadow: 'none' }}>
+            <h3 style={{ fontSize: '14px', color: '#64748b' }}>Highest Score</h3>
+            <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#10b981' }}>{analytics.high}%</p>
+          </div>
+          <div className="card" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', boxShadow: 'none' }}>
+            <h3 style={{ fontSize: '14px', color: '#64748b' }}>Lowest Score</h3>
+            <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>{analytics.low}%</p>
+          </div>
+        </div>
+
+        <div className="table-wrap" style={{ maxHeight: '500px', overflowY: 'auto' }}>
           <table>
             <thead>
               <tr>
                 <th>Student</th>
                 <th>Email</th>
+                <th>Subjects</th>
                 <th>Score</th>
+                <th>Attempted</th>
+                <th>Failed</th>
                 <th>Correct</th>
                 <th>Submitted At</th>
                 <th>Auto</th>
               </tr>
             </thead>
             <tbody>
-              {dashboard.recentSubmissions.map((r) => (
+              {allResults.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.name}</td>
-                  <td>{r.email}</td>
-                  <td>{r.scorePercent}%</td>
-                  <td>
-                    {r.totalCorrect}/{r.totalQuestions}
-                  </td>
+                  <td>{[r.student?.firstName, r.student?.surname].filter(Boolean).join(' ') || 'Unknown'}</td>
+                  <td>{r.student?.email || 'N/A'}</td>
+                  <td>{(r.student?.subjects || []).join(', ')}</td>
+                  <td><span style={{ fontWeight: 600, color: r.scorePercent >= 50 ? '#10b981' : '#ef4444' }}>{r.scorePercent}%</span></td>
+                  <td>{r.attemptedQuestions || 0}</td>
+                  <td>{(r.attemptedQuestions || 0) - (r.totalCorrect || 0)}</td>
+                  <td>{r.totalCorrect}/{r.totalQuestions}</td>
                   <td>{new Date(r.submittedAt).toLocaleString()}</td>
                   <td>{r.autoSubmitted ? 'Yes' : 'No'}</td>
                 </tr>
               ))}
+              {allResults.length === 0 && (
+                <tr>
+                  <td colSpan="9" style={{ textAlign: 'center', padding: '20px', color: '#64748b' }}>No submitted results yet.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

@@ -5,6 +5,8 @@ import { User } from '../models/User.js';
 import { Question } from '../models/Question.js';
 import { ExamSession } from '../models/ExamSession.js';
 import { ReadingPassage } from '../models/ReadingPassage.js';
+import { AppConfig } from '../models/AppConfig.js';
+import { getOrCreateSession, finalizeSubmission, getExamDurationMs } from '../services/examService.js';
 import {
   parseSubjects,
   parseQuestionWorkbook,
@@ -165,6 +167,45 @@ export async function listResults(req, res) {
       subjectStats: s.subjectStats,
     })),
   });
+}
+
+export async function exportResultsExcel(req, res) {
+  const sessions = await ExamSession.find({ isSubmitted: true })
+    .sort({ submittedAt: -1 })
+    .populate('student', 'firstName surname middleName email subjects gender').lean();
+
+  const rows = sessions.map((s) => ({
+    FirstName: s.student?.firstName || '',
+    Surname: s.student?.surname || '',
+    MiddleName: s.student?.middleName || '',
+    Email: s.student?.email || '',
+    Gender: s.student?.gender || '',
+    Subjects: (s.student?.subjects || []).join(', '),
+    ScorePercent: s.scorePercent != null ? `${s.scorePercent}%` : '',
+    TotalCorrect: s.totalCorrect || 0,
+    TotalQuestions: s.totalQuestions || 0,
+    AttemptedQuestions: s.attemptedQuestions || 0,
+    StartedAt: s.startedAt ? new Date(s.startedAt).toLocaleString() : '',
+    SubmittedAt: s.submittedAt ? new Date(s.submittedAt).toLocaleString() : '',
+    AutoSubmitted: s.autoSubmitted ? 'Yes' : 'No'
+  }));
+
+  const wb = xlsx.utils.book_new();
+  const wsResults = xlsx.utils.json_to_sheet(rows);
+  
+  // Format column widths for readability
+  wsResults['!cols'] = [
+    { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 25 }, { wch: 10 }, { wch: 40 },
+    { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 15 }
+  ];
+
+  xlsx.utils.book_append_sheet(wb, wsResults, 'Detailed Results');
+
+  const buffer = workbookToBuffer(wb);
+  const filename = `exam_results_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buffer);
 }
 
 function generateBlockLayoutRows(passageGroup) {
@@ -524,4 +565,59 @@ export async function exportPassagesExcel(req, res) {
   res.send(buffer);
 }
 
+/* ───────── Config & Global Controls ───────── */
 
+export async function getConfig(req, res) {
+  let config = await AppConfig.findOne();
+  if (!config) config = await AppConfig.create({});
+  res.json({ 
+    examDurationMinutes: config.examDurationMinutes,
+    isExamOpen: config.isExamOpen 
+  });
+}
+
+export async function updateConfig(req, res) {
+  const { examDurationMinutes } = req.body;
+  if (!examDurationMinutes || typeof examDurationMinutes !== 'number') {
+    throw httpError(400, 'Invalid examDurationMinutes');
+  }
+  let config = await AppConfig.findOne();
+  if (!config) config = await AppConfig.create({});
+  config.examDurationMinutes = examDurationMinutes;
+  await config.save();
+  res.json({ message: 'Configuration updated', config });
+}
+
+export async function startAllExams(req, res) {
+  let config = await AppConfig.findOne();
+  if (!config) config = await AppConfig.create({});
+  config.isExamOpen = true;
+  await config.save();
+  res.json({ message: `Global Exam Access is now OPEN. Students can proceed.` });
+}
+
+export async function endAllExams(req, res) {
+  let config = await AppConfig.findOne();
+  if (!config) config = await AppConfig.create({});
+  config.isExamOpen = false;
+  await config.save();
+
+  const sessions = await ExamSession.find({ isSubmitted: false });
+  let count = 0;
+  for (const session of sessions) {
+    if (session.hasStarted) {
+      await finalizeSubmission(session);
+      count++;
+    }
+  }
+  res.json({ message: `Access closed. Ended and submitted ${count} active sessions.` });
+}
+
+export async function endStudentExam(req, res) {
+  const { studentId } = req.params;
+  let session = await ExamSession.findOne({ student: studentId });
+  if (!session) throw httpError(404, 'No exam session found for this student');
+  if (session.isSubmitted) throw httpError(400, 'Exam is already submitted');
+  await finalizeSubmission(session);
+  res.json({ message: 'Student exam ended and submitted.' });
+}

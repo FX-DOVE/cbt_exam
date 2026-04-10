@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import { Question } from '../models/Question.js';
 import { ExamSession } from '../models/ExamSession.js';
-import { getOrCreateSession, startExamIfNeeded, autoSubmitIfExpired, finalizeSubmission } from '../services/examService.js';
+import { AppConfig } from '../models/AppConfig.js';
+import { getOrCreateSession, startExamIfNeeded, autoSubmitIfExpired, finalizeSubmission, getExamDurationMs } from '../services/examService.js';
 import { httpError } from '../utils/httpError.js';
 import { shuffleQuestionsForStudent } from '../utils/shuffle.js';
+
+const TOTAL_EXAM_QUESTIONS = Number(process.env.TOTAL_EXAM_QUESTIONS) || 400;
 
 function toQuestionDTO(q, isSubmitted = false) {
   const base = {
@@ -23,10 +26,10 @@ function toQuestionDTO(q, isSubmitted = false) {
   return base;
 }
 
-function sessionState(session) {
+function sessionState(session, durationMs = 2 * 60 * 60 * 1000) {
   const now = Date.now();
   const end = session.expiresAt ? new Date(session.expiresAt).getTime() : null;
-  const timeLeftMs = end ? Math.max(0, end - now) : 2 * 60 * 60 * 1000;
+  const timeLeftMs = end ? Math.max(0, end - now) : durationMs;
 
   return {
     id: session._id,
@@ -62,14 +65,20 @@ export async function getExamData(req, res) {
 
   const resetCount = student.examResetCount || 0;
   const studentId = String(student._id);
+  const perSubjectLimit = Math.floor(TOTAL_EXAM_QUESTIONS / Math.max(1, subjects.length));
+
   const grouped = subjects.map((subject) => {
     const list = questions.filter((q) => q.subject === subject);
     const shuffled = shuffleQuestionsForStudent(studentId, resetCount, subject, list);
+    const limited = shuffled.slice(0, perSubjectLimit);
     return {
       subject,
-      questions: shuffled.map((q) => toQuestionDTO(q, session.isSubmitted)),
+      questions: limited.map((q) => toQuestionDTO(q, session.isSubmitted)),
     };
   });
+
+  const durationMs = await getExamDurationMs();
+  const config = await AppConfig.findOne();
 
   res.json({
     student: {
@@ -81,8 +90,9 @@ export async function getExamData(req, res) {
       email: student.email,
       gender: student.gender,
     },
-    examSession: sessionState(session),
+    examSession: sessionState(session, durationMs),
     subjects: grouped,
+    isExamOpen: config?.isExamOpen || false,
   });
 }
 
@@ -91,8 +101,9 @@ export async function startExam(req, res) {
   let session = await getOrCreateSession(student._id, student.examResetCount || 0);
   if (session.isSubmitted) throw httpError(403, 'Exam already submitted. Contact admin for reset.');
 
+  const durationMs = await getExamDurationMs();
   session = await startExamIfNeeded(session, student.examResetCount || 0);
-  res.json({ examSession: sessionState(session) });
+  res.json({ examSession: sessionState(session, durationMs) });
 }
 
 const saveAnswerSchema = z.object({
@@ -134,17 +145,19 @@ export async function saveAnswer(req, res) {
   }
 
   await session.save();
-  res.json({ message: 'Answer saved', examSession: sessionState(session) });
+  const durationMs = await getExamDurationMs();
+  res.json({ message: 'Answer saved', examSession: sessionState(session, durationMs) });
 }
 
 export async function submitExam(req, res) {
   const student = req.currentUser;
+  const durationMs = await getExamDurationMs();
   let session = await getOrCreateSession(student._id, student.examResetCount || 0);
-  if (session.isSubmitted) return res.json({ message: 'Already submitted', examSession: sessionState(session) });
+  if (session.isSubmitted) return res.json({ message: 'Already submitted', examSession: sessionState(session, durationMs) });
 
   session = await startExamIfNeeded(session, student.examResetCount || 0);
   session = await finalizeSubmission(session);
-  res.json({ message: 'Submitted', examSession: sessionState(session) });
+  res.json({ message: 'Submitted', examSession: sessionState(session, durationMs) });
 }
 
 export async function getResult(req, res) {
@@ -152,6 +165,7 @@ export async function getResult(req, res) {
   let session = await getOrCreateSession(student._id, student.examResetCount || 0);
   session = await autoSubmitIfExpired(session);
   if (!session.isSubmitted) throw httpError(400, 'Exam not submitted yet');
-  res.json({ examSession: sessionState(session) });
+  const durationMs = await getExamDurationMs();
+  res.json({ examSession: sessionState(session, durationMs) });
 }
 
